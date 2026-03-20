@@ -66,7 +66,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     
     steps:
-      # Step 1 — Anche qui serve il codice, anche se non essenziale
+      # Step 1 — Anche qui serve il codice per leggere la versione dal package.json
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -82,7 +82,12 @@ jobs:
         run: |
           gunzip -c image.tar.gz | docker load
 
-      # Step 4 — Login a Docker Hub usando i secrets del repository
+      # Step 4 — Legge la versione dal package.json
+      - name: Get version from package.json
+        id: pkg_version
+        run: echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
+      # Step 5 — Login a Docker Hub usando i secrets del repository
       # I secrets garantirono che username e token non siano visibili nei log
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -90,16 +95,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}   # Solo username
           password: ${{ secrets.DOCKERHUB_TOKEN }}      # Token sicuro
 
-      # Step 5 — Ritagga l’immagine per Docker Hub
-      # Da: its-node-demo:latest
-      # A:  <username>/its-node-demo:latest
-      - name: Tag Docker image
+      # Step 6 — Ritagga l’immagine per Docker Hub sia come latest che con la versione
+      - name: Tag and Push Docker image
         run: |
-          docker tag its-node-demo:latest \
-          ${{ secrets.DOCKERHUB_USERNAME }}/its-node-demo:latest
-
-
-      # Step 6 — Push finale verso Docker
-      - name: Push Docker image to Docker Hub
-        run: |
+          # 1. Tagga e pusha come 'latest'
+          docker tag its-node-demo:latest ${{ secrets.DOCKERHUB_USERNAME }}/its-node-demo:latest
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/its-node-demo:latest
+          
+          # 2. Tagga e pusha con la versione del package.json (es. 1.0.0)
+          docker tag its-node-demo:latest ${{ secrets.DOCKERHUB_USERNAME }}/its-node-demo:${{ env.VERSION }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/its-node-demo:${{ env.VERSION }}
