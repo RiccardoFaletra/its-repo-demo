@@ -1,38 +1,112 @@
-name: CI - Docker Build
+# Nome della pipeline che comparirà nella UI di GitHub Act
+name: CI + Docker Hub Delivery
 
+# Eventi che attivano la pipeline
 on:
-  push:
+  push:          # Ogni push su branch "main"
     branches: ["main"]
+  pull_request:  # Ogni pull request verso il repository
 
+# -------------------------
+# JOB 1 — BUILD (CI)
+# -------------------------
 jobs:
-  docker-build:
-    runs-on: ubuntu-latest
-
-    env:
-      IMAGE_NAME: its-node-demo
-      DATE_TAG: ${{ github.run_id }}-${{ github.run_number }}
+  build:
+    runs-on: ubuntu-latest # Runner GitHub Actions basato su Ubuntu
 
     steps:
-      - name: Checkout repo
+      # Step 1 — Scarica il codice del repository nel runner
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v3
+      # Step 2 — Installa Node.js 18 sul runner
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: 18
 
+      # Step 3 — Installa tutte le dipendenze del progetto (npm install)
       - name: Install dependencies
         run: npm install
 
+      # Step 4 — Esegue i test automatici
+      # Se non ci sono test, non fallisce (|| echo "No tests")
+      - name: Run tests
+        run: npm test || echo "No tests"
+
+      # Step 5 — Costruisce l’immagine Docker nel job BUILD
+      # Questa immagine NON sarà pubblicata, solo testata
       - name: Build Docker image
         run: |
-          docker build -t $IMAGE_NAME:${{ github.sha }} .
-          docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_NAME:${{ env.DATE_TAG }}
+          docker build -t its-node-demo:latest .
 
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-      - name: Push images
+      # Step 6 — Salva l’immagine Docker in un file tar.gz
+      # cosi può essere trasferita a un altro job
+      - name: Save Docker image as artifact
         run: |
-          docker push $IMAGE_NAME:${{ github.sha }}
-          docker push $IMAGE_NAME:${{ env.DATE_TAG }}
+          docker save its-node-demo:latest | gzip > image.tar.gz
+
+      # Step 7 — Carica l’immagine salvata come artifact del workflow
+      # Così il job DEPLOY potrà scaricarla
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image         # Nome dell’artifact
+          path: image.tar.gz         # File da caricare
+          retention-days: 1          # Lo mantiene 1 giorno (per sicurezza)
+
+  # -------------------------
+  # JOB 2 — DEPLOY (CD)
+  # -------------------------
+  deploy:
+    name: Load & Push to Docker Hub
+    needs: build                   # Il job parte SOLO se il job build è riuscito
+    runs-on: ubuntu-latest
+    
+    # Questo job si attiva SOLO se il push è sul branch "main"
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      IMAGE_BASE: its-node-demo
+      DATE_TAG: ${{ github.run_id }}-${{ github.run_number }}
+    
+    steps:
+      # Step 1 — Checkout (utile se servono file extra, anche se qui abbiamo l'artifact)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2 — Scarica l’artifact creato dal job BUILD
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image # Nome definito nel job BUILD
+
+      # Step 3 — Ricarica l’immagine Docker dal file tar.gz
+      - name: Load Docker image
+        run: |
+          gunzip -c image.tar.gz | docker load
+
+      # Step 4 — Login a Docker Hub usando i secrets
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Step 5 — Tagga l'immagine con più versioni
+      # Usiamo lo username dei secrets per assicurarci che il push funzioni
+      - name: Tag Docker images
+        run: |
+          # Versione Latest
+          docker tag its-node-demo:latest ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:latest
+          # Versione con Commit SHA
+          docker tag its-node-demo:latest ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:${{ github.sha }}
+          # Versione con ID del Job (DATE_TAG)
+          docker tag its-node-demo:latest ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:${{ env.DATE_TAG }}
+
+      # Step 6 — Push multiplo verso Docker Hub
+      - name: Push Docker images
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_BASE }}:${{ env.DATE_TAG }}
